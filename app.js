@@ -1,5 +1,6 @@
 const DB_KEY = "costEvidence.workspace.v2";
 const LEGACY_DEMO_KEY = "costEvidence.demoLoaded";
+const APP_BASE = detectAppBase();
 
 const demoProject = {
   id: "demo-project-001",
@@ -255,6 +256,34 @@ function recordUrl(record) {
   return `/projects/${record.projectId}/evidence/${record.id}`;
 }
 
+function detectAppBase() {
+  const script = document.currentScript || document.querySelector("script[src$='app.js']");
+  if (!script) return "";
+  const path = new URL(script.getAttribute("src") || script.src, window.location.href).pathname;
+  return path.endsWith("/app.js") ? path.slice(0, -"/app.js".length) : "";
+}
+
+function normalizeAppPath(path = window.location.pathname) {
+  let normalized = path || "/";
+  if (APP_BASE && (normalized === APP_BASE || normalized.startsWith(`${APP_BASE}/`))) {
+    normalized = normalized.slice(APP_BASE.length) || "/";
+  }
+  if (normalized.endsWith("/index.html")) normalized = normalized.slice(0, -"/index.html".length) || "/";
+  return normalized || "/";
+}
+
+function routeHref(path) {
+  const normalized = normalizeAppPath(path);
+  if (!APP_BASE) return normalized;
+  return normalized === "/" ? `${APP_BASE}/` : `${APP_BASE}${normalized}`;
+}
+
+function localizeLinks(root = document) {
+  root.querySelectorAll('a[data-link][href^="/"]').forEach((link) => {
+    link.setAttribute("href", routeHref(link.getAttribute("href")));
+  });
+}
+
 function downloadFile(filename, content, type = "text/plain;charset=utf-8") {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -276,7 +305,7 @@ function showToast(message) {
 }
 
 function go(path) {
-  history.pushState({}, "", path);
+  history.pushState({}, "", routeHref(path));
   render();
   window.scrollTo({ top: 0, behavior: "instant" });
 }
@@ -1065,7 +1094,7 @@ function openSearchModal() {
 }
 
 function renderSearchHits(items) {
-  return items.length ? items.map((item) => `<a class="search-hit" href="${item.href}" data-link><strong>${esc(item.title)}</strong><p>${esc(item.sub)}</p></a>`).join("") : `<div class="empty-line">没有匹配结果</div>`;
+  return items.length ? items.map((item) => `<a class="search-hit" href="${routeHref(item.href)}" data-link><strong>${esc(item.title)}</strong><p>${esc(item.sub)}</p></a>`).join("") : `<div class="empty-line">没有匹配结果</div>`;
 }
 
 function openBatchModal(projectId) {
@@ -1085,9 +1114,7 @@ function openBatchModal(projectId) {
 }
 
 function currentPath() {
-  const path = window.location.pathname;
-  if (path.endsWith("/index.html")) return "/";
-  return path || "/";
+  return normalizeAppPath();
 }
 
 function render() {
@@ -1109,6 +1136,7 @@ function render() {
   else if (path === "/settings") html = settingsPage();
   else html = homePage();
   app.innerHTML = html;
+  localizeLinks(app);
   const topbar = document.querySelector("[data-topbar]");
   if (topbar) topbar.classList.toggle("is-scrolled", window.scrollY > 12);
 }

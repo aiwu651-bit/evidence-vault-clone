@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4177);
+const pagesBase = "/evidence-vault-clone";
 
 const types = {
   ".html": "text/html; charset=utf-8",
@@ -18,7 +19,9 @@ const types = {
 };
 
 function cleanPath(urlPath) {
-  const decoded = decodeURIComponent(urlPath.split("?")[0]);
+  let decoded = decodeURIComponent(urlPath.split("?")[0]);
+  if (decoded === pagesBase) decoded = "/";
+  if (decoded.startsWith(`${pagesBase}/`)) decoded = decoded.slice(pagesBase.length);
   return decoded === "/" ? "/index.html" : decoded;
 }
 
