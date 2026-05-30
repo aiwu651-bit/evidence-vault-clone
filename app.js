@@ -1,6 +1,8 @@
 const DB_KEY = "costEvidence.workspace.v2";
 const LEGACY_DEMO_KEY = "costEvidence.demoLoaded";
 const APP_BASE = detectAppBase();
+const IDB_NAME = "EvidenceVaultLocalDB";
+const IDB_VERSION = 1;
 
 const demoProject = {
   id: "demo-project-001",
@@ -100,6 +102,7 @@ function createBlankState() {
       codePrefix: "EV-2026",
       aiEnabled: true,
       offlineEnabled: true,
+      pwaReady: true,
     },
     ui: {
       projectFilter: "全部",
@@ -114,7 +117,8 @@ function loadState() {
     const raw = localStorage.getItem(DB_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      return { ...createBlankState(), ...parsed, ui: { ...createBlankState().ui, ...(parsed.ui || {}) } };
+      const base = createBlankState();
+      return { ...base, ...parsed, settings: { ...base.settings, ...(parsed.settings || {}) }, ui: { ...base.ui, ...(parsed.ui || {}) } };
     }
   } catch {
     localStorage.removeItem(DB_KEY);
@@ -130,6 +134,7 @@ let state = loadState();
 
 function saveState() {
   localStorage.setItem(DB_KEY, JSON.stringify(state));
+  void saveWorkspaceMirror();
 }
 
 function seedDemoInto(target) {
@@ -282,6 +287,222 @@ function localizeLinks(root = document) {
   root.querySelectorAll('a[data-link][href^="/"]').forEach((link) => {
     link.setAttribute("href", routeHref(link.getAttribute("href")));
   });
+}
+
+function idbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function idbTransaction(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function openVaultDb() {
+  if (!("indexedDB" in window)) return Promise.reject(new Error("IndexedDB unavailable"));
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(IDB_NAME, IDB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("workspace")) db.createObjectStore("workspace", { keyPath: "id" });
+      if (!db.objectStoreNames.contains("attachments")) {
+        const store = db.createObjectStore("attachments", { keyPath: "id" });
+        store.createIndex("recordId", "recordId");
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function idbPut(storeName, value) {
+  const db = await openVaultDb();
+  try {
+    const tx = db.transaction(storeName, "readwrite");
+    tx.objectStore(storeName).put(value);
+    await idbTransaction(tx);
+  } finally {
+    db.close();
+  }
+}
+
+async function idbGet(storeName, key) {
+  const db = await openVaultDb();
+  try {
+    const tx = db.transaction(storeName, "readonly");
+    return await idbRequest(tx.objectStore(storeName).get(key));
+  } finally {
+    db.close();
+  }
+}
+
+async function idbDelete(storeName, key) {
+  const db = await openVaultDb();
+  try {
+    const tx = db.transaction(storeName, "readwrite");
+    tx.objectStore(storeName).delete(key);
+    await idbTransaction(tx);
+  } finally {
+    db.close();
+  }
+}
+
+async function saveWorkspaceMirror() {
+  try {
+    await idbPut("workspace", {
+      id: "state",
+      updatedAt: new Date().toISOString(),
+      value: JSON.parse(JSON.stringify(state)),
+    });
+  } catch {
+    // localStorage remains the fast path when IndexedDB is unavailable.
+  }
+}
+
+async function hydrateStateFromIdb() {
+  if (localStorage.getItem(DB_KEY)) return;
+  try {
+    const saved = await idbGet("workspace", "state");
+    if (!saved?.value) return;
+    const base = createBlankState();
+    state = { ...base, ...saved.value, settings: { ...base.settings, ...(saved.value.settings || {}) }, ui: { ...base.ui, ...(saved.value.ui || {}) } };
+    saveState();
+    render();
+  } catch {
+    // Empty or blocked IndexedDB should not prevent using the app.
+  }
+}
+
+async function storeRecordFiles(recordId, files) {
+  const now = new Date().toISOString();
+  const metas = [];
+  for (const file of files) {
+    const id = uid("file");
+    const meta = { id, recordId, name: file.name, type: file.type || "application/octet-stream", size: file.size, createdAt: now };
+    await idbPut("attachments", { ...meta, blob: file });
+    metas.push(meta);
+  }
+  return metas;
+}
+
+async function openStoredFile(fileId) {
+  try {
+    const stored = await idbGet("attachments", fileId);
+    if (!stored?.blob) {
+      showToast("附件不存在或已被浏览器清理");
+      return;
+    }
+    const url = URL.createObjectURL(stored.blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.target = "_blank";
+    anchor.rel = "noopener";
+    anchor.download = stored.name || "attachment";
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 8000);
+  } catch {
+    showToast("无法读取附件");
+  }
+}
+
+async function deleteStoredFile(recordId, fileId) {
+  const record = getRecord(recordId);
+  if (!record || !window.confirm("确认删除这个附件？")) return;
+  await idbDelete("attachments", fileId);
+  record.files = (record.files || []).filter((file) => file.id !== fileId);
+  record.attachments = record.files.length;
+  record.analysis = analyzeRecord(record, record.files);
+  saveState();
+  showToast("附件已删除");
+  render();
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderFileList(files = []) {
+  return files.length
+    ? `<div class="file-list">${files.map((file) => `
+        <div class="file-row">
+          <span>${icon(file.type?.startsWith("image/") ? "camera" : "fileText")} <strong>${esc(file.name)}</strong><small>${esc(file.type || "文件")} · ${formatBytes(file.size)}</small></span>
+          <span class="chip">${esc((file.createdAt || "").slice(0, 10) || "刚刚")}</span>
+        </div>
+      `).join("")}</div>`
+    : `<div class="empty-line">暂无真实附件</div>`;
+}
+
+function renderAnalysis(analysis) {
+  if (!analysis) return `<div class="empty-line">暂无 AI 解析结果</div>`;
+  return `
+    <div class="analysis-grid">
+      <div class="analysis-card"><h3>${icon("brain")} OCR 字段</h3><p>${esc(analysis.ocr.summary)}</p><div class="tag-row">${analysis.ocr.fields.map((item) => `<span class="chip">${esc(item)}</span>`).join("")}</div></div>
+      <div class="analysis-card"><h3>${icon("fileCheck")} 签章检测</h3><p>${esc(analysis.seal.summary)}</p><div class="tag-row">${analysis.seal.items.map((item) => `<span class="chip">${esc(item)}</span>`).join("")}</div></div>
+      <div class="analysis-card"><h3>${icon("camera")} 影像分析</h3><p>${esc(analysis.photo.summary)}</p><div class="tag-row">${analysis.photo.items.map((item) => `<span class="chip">${esc(item)}</span>`).join("")}</div></div>
+      <div class="analysis-card"><h3>${icon("alert")} 修复建议</h3><ul>${analysis.suggestions.map((item) => `<li>${esc(item)}</li>`).join("")}</ul></div>
+    </div>
+  `;
+}
+
+function analyzeRecord(record, files = record.files || []) {
+  const text = `${record.title} ${record.type} ${record.status} ${record.summary} ${(record.tags || []).join(" ")}`;
+  const hasFiles = files.length > 0 || Number(record.attachments || 0) > 0;
+  const hasImage = files.some((file) => String(file.type || "").startsWith("image/")) || record.type.includes("照片");
+  const signed = isSigned(record.status) || /签回|盖章|签章|公章|签字/.test(text);
+  const amount = Number(record.amount || 0);
+  const missing = [];
+  if (!hasFiles) missing.push("缺少原始附件或现场照片");
+  if (!signed) missing.push("缺少签章/签字确认");
+  if (!record.summary || record.summary.length < 24) missing.push("摘要不足，建议补发生原因和结算依据");
+  if (isOverdue(record) && !signed) missing.push("已超签回截止日");
+  if (amount > 0 && !/(金额|造价|工程量|签证|变更|结算|确认)/.test(text)) missing.push("金额依据说明不足");
+  const baseScore = Number(record.completeness || 0);
+  const score = Math.max(0, Math.min(100, baseScore + (hasFiles ? 8 : -12) + (signed ? 8 : -10) + (record.summary?.length > 40 ? 5 : -3)));
+  const fields = [
+    `编号 ${record.code || "待补"}`,
+    `日期 ${record.date || "待补"}`,
+    `截止 ${record.deadline || "未设置"}`,
+    `金额 ${moneyCompact(amount)}`,
+  ];
+  const sealItems = signed ? ["已识别签回状态", "签章链可用于结算"] : ["未确认签章", "需补签章页/审批页"];
+  const photoItems = hasImage ? ["包含现场影像", "可辅助场景佐证"] : hasFiles ? ["包含资料附件", "建议补现场照片"] : ["未上传附件", "无法做影像复核"];
+  return {
+    generatedAt: new Date().toISOString(),
+    score,
+    missingItems: missing,
+    ocr: {
+      summary: `已提取编号、日期、金额、类型等关键字段，当前可用字段完整度 ${score}/100。`,
+      fields,
+    },
+    seal: {
+      found: signed,
+      score: signed ? Math.min(100, score + 4) : Math.max(0, score - 18),
+      summary: signed ? "记录状态或文本中已体现签回/签章信息。" : "暂未形成可靠签章证据，建议上传盖章页或审批回执。",
+      items: sealItems,
+    },
+    photo: {
+      found: hasImage,
+      summary: hasImage ? "已具备现场影像线索，可结合日期和项目编号进入证据链。" : "当前没有可识别影像，无法判断现场场景。",
+      items: photoItems,
+    },
+    risks: missing,
+    suggestions: missing.length ? missing.map((item) => `补充：${item}`) : ["当前证据链较完整，可进入报告导出或归档。"],
+  };
+}
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  const base = APP_BASE || "";
+  navigator.serviceWorker.register(`${base}/sw.js`, { scope: `${base || "/"}/` }).catch(() => {});
 }
 
 function downloadFile(filename, content, type = "text/plain;charset=utf-8") {
@@ -825,12 +1046,15 @@ function evidenceFormPage(projectId) {
           <div class="field"><label>发生日期</label><input name="date" type="date" value="${today()}"></div>
           <div class="field"><label>签回截止日</label><input name="deadline" type="date" value="${today()}"></div>
           <div class="field"><label>涉及金额</label><input name="amount" inputmode="decimal" placeholder="例如：486000"></div>
-          <div class="field"><label>附件数量</label><input name="attachments" type="number" min="0" value="0"></div>
+          <div class="field"><label>附件数量</label><input name="attachments" type="number" min="0" value="0" data-attachment-count></div>
           <div class="field"><label>标签</label><input name="tags" placeholder="土方, 超挖, 基坑"></div>
           <div class="field"><label>完整度评分</label><input name="completeness" type="number" min="0" max="100" value="76"></div>
         </div>
         <div class="field"><label>证据摘要</label><textarea name="summary" placeholder="说明发生原因、现场确认情况、结算依据和待补资料"></textarea></div>
-        <div class="drop-zone">${icon("upload")}<br>本地复刻版会记录附件数量和索引；真实文件接入时可替换为上传组件。</div>
+        <label class="drop-zone file-drop">${icon("upload")}<strong>上传照片、签章页或资料文件</strong><span>文件会保存到浏览器 IndexedDB，本地可预览、下载和离线查看。</span>
+          <input name="files" type="file" multiple data-file-input accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt">
+          <div class="file-list compact" data-file-list>尚未选择文件</div>
+        </label>
         <div class="form-actions"><a class="btn" href="/projects/${project.id}" data-link>取消</a><button class="btn btn-primary" type="submit">${icon("check")} 保存存证</button></div>
       </form>
     </section>
@@ -842,6 +1066,7 @@ function evidencePage(projectId, recordId) {
   const project = ensureProject(projectId);
   const item = getRecord(recordId);
   if (!project || !item) return notFoundPage("证据不存在");
+  const analysis = item.analysis || analyzeRecord(item);
   const content = `
     <div class="page-title">
       <div class="crumb"><a href="/projects/${project.id}" data-link>${esc(project.name)}</a> ${icon("chevron")} <span>${esc(item.title)}</span></div>
@@ -872,24 +1097,32 @@ function evidencePage(projectId, recordId) {
         <section class="panel">
           <h2>${icon("brain")} AI 解析结果</h2>
           <div class="metric-grid">
-            <div class="mini-stat"><strong>${Number(item.completeness || 0)}</strong><span>字段完整度</span></div>
-            <div class="mini-stat"><strong>${Math.min(98, Number(item.completeness || 0) + 8)}</strong><span>影像质量</span></div>
-            <div class="mini-stat"><strong>${Number(item.completeness || 0) < 80 ? 2 : 0}</strong><span>待补项</span></div>
+            <div class="mini-stat"><strong>${analysis.score}</strong><span>综合评分</span></div>
+            <div class="mini-stat"><strong>${analysis.seal.score}</strong><span>签章完整性</span></div>
+            <div class="mini-stat"><strong>${analysis.missingItems.length}</strong><span>待补项</span></div>
             <div class="mini-stat"><strong>${isSigned(item.status) ? "可用" : "待补"}</strong><span>结算支撑</span></div>
           </div>
-          <div class="report-box" style="margin-top:16px">
-            <h3>复核摘要</h3>
-            <p>${esc(item.summary || "该证据已完成基础字段解析，建议补齐附件、签章和关联日志后进入正式报告。")}</p>
-          </div>
+          <div style="margin-top:16px">${renderAnalysis(analysis)}</div>
+          <div class="form-actions" style="margin-top:16px"><button class="btn btn-primary" data-run-analysis="${item.id}">${icon("brain")} 重新 AI 分析</button></div>
         </section>
         <section class="panel" style="margin-top:18px">
           <h2>附件与流转</h2>
           <div class="metric-grid">
-            <div class="mini-stat"><strong>${Number(item.attachments || 0)}</strong><span>附件数量</span></div>
+            <div class="mini-stat"><strong>${Math.max(Number(item.attachments || 0), (item.files || []).length)}</strong><span>附件数量</span></div>
             <div class="mini-stat"><strong>${isOverdue(item) ? "逾期" : isDueSoon(item) ? "临近" : "正常"}</strong><span>时效</span></div>
             <div class="mini-stat"><strong>${item.createdAt ? item.createdAt.slice(0, 10) : item.date}</strong><span>入库日期</span></div>
           </div>
-          <div class="drop-zone" style="margin-top:16px">${icon("fileText")}<br>真实接入时这里承载原始文件、照片水印、签章页和审批记录。</div>
+          <form class="attachment-uploader" data-attachment-form data-record-id="${item.id}">
+            <label class="drop-zone file-drop">${icon("upload")}<strong>继续补充附件</strong><span>支持照片、PDF、表格和文本文件，保存后自动重新分析。</span>
+              <input name="files" type="file" multiple data-file-input accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt">
+              <div class="file-list compact" data-file-list>尚未选择文件</div>
+            </label>
+            <button class="btn btn-primary" type="submit">${icon("check")} 保存附件</button>
+          </form>
+          <div class="attachment-list" style="margin-top:16px">
+            ${renderFileList(item.files || [])}
+            ${(item.files || []).map((file) => `<div class="file-actions"><button class="btn" data-open-file="${file.id}">${icon("download")} 预览/下载</button><button class="btn danger" data-delete-file="${file.id}" data-record-id="${item.id}">${icon("trash")} 删除</button></div>`).join("")}
+          </div>
         </section>
       </section>
     </div>
@@ -1186,10 +1419,33 @@ document.addEventListener("click", (event) => {
     if (record) {
       record.status = statusAction.dataset.statusAction;
       record.completeness = Math.max(Number(record.completeness || 0), isSigned(record.status) ? 88 : Number(record.completeness || 0));
+      record.analysis = analyzeRecord(record, record.files || []);
       saveState();
       showToast(`已更新为：${record.status}`);
       render();
     }
+    return;
+  }
+  const runAnalysis = event.target.closest("[data-run-analysis]");
+  if (runAnalysis) {
+    const record = getRecord(runAnalysis.dataset.runAnalysis);
+    if (record) {
+      record.analysis = analyzeRecord(record, record.files || []);
+      record.completeness = Math.max(Number(record.completeness || 0), record.analysis.score);
+      saveState();
+      showToast("AI 解析已更新");
+      render();
+    }
+    return;
+  }
+  const openFile = event.target.closest("[data-open-file]");
+  if (openFile) {
+    void openStoredFile(openFile.dataset.openFile);
+    return;
+  }
+  const deleteFile = event.target.closest("[data-delete-file]");
+  if (deleteFile) {
+    void deleteStoredFile(deleteFile.dataset.recordId, deleteFile.dataset.deleteFile);
     return;
   }
   const deleteButton = event.target.closest("[data-delete-record]");
@@ -1228,7 +1484,7 @@ document.addEventListener("click", (event) => {
   }
 });
 
-document.addEventListener("submit", (event) => {
+document.addEventListener("submit", async (event) => {
   const projectForm = event.target.closest("[data-project-form]");
   if (projectForm) {
     event.preventDefault();
@@ -1254,6 +1510,7 @@ document.addEventListener("submit", (event) => {
   if (evidenceForm) {
     event.preventDefault();
     const data = formObject(evidenceForm);
+    const files = Array.from(evidenceForm.querySelector("[data-file-input]")?.files || []);
     const record = {
       id: uid("ev"),
       projectId: evidenceForm.dataset.projectId,
@@ -1266,10 +1523,12 @@ document.addEventListener("submit", (event) => {
       amount: parseAmount(data.amount),
       tags: splitTags(data.tags),
       summary: data.summary.trim(),
-      attachments: Number(data.attachments || 0),
+      attachments: Math.max(Number(data.attachments || 0), files.length),
       completeness: Math.max(0, Math.min(100, Number(data.completeness || 0))),
       createdAt: new Date().toISOString(),
     };
+    record.files = await storeRecordFiles(record.id, files);
+    record.analysis = analyzeRecord(record, record.files);
     state.records.unshift(record);
     saveState();
     showToast("新存证已保存");
@@ -1359,6 +1618,27 @@ document.addEventListener("submit", (event) => {
     return;
   }
 
+  const attachmentForm = event.target.closest("[data-attachment-form]");
+  if (attachmentForm) {
+    event.preventDefault();
+    const record = getRecord(attachmentForm.dataset.recordId);
+    if (!record) return;
+    const files = Array.from(attachmentForm.querySelector("[data-file-input]")?.files || []);
+    if (!files.length) {
+      showToast("请先选择附件");
+      return;
+    }
+    const metas = await storeRecordFiles(record.id, files);
+    record.files = [...(record.files || []), ...metas];
+    record.attachments = Math.max(Number(record.attachments || 0), record.files.length);
+    record.analysis = analyzeRecord(record, record.files);
+    record.completeness = Math.max(Number(record.completeness || 0), record.analysis.score);
+    saveState();
+    showToast(`已保存 ${metas.length} 个附件并完成分析`);
+    render();
+    return;
+  }
+
   const aiForm = event.target.closest("[data-ai-form]");
   if (aiForm) {
     event.preventDefault();
@@ -1369,6 +1649,18 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  const fileInput = event.target.closest("[data-file-input]");
+  if (fileInput) {
+    const files = Array.from(fileInput.files || []);
+    const form = fileInput.closest("form");
+    const count = form?.querySelector("[data-attachment-count]");
+    if (count) count.value = files.length;
+    const list = fileInput.closest(".file-drop")?.querySelector("[data-file-list]");
+    if (list) {
+      list.innerHTML = files.length ? files.map((file) => `<div class="file-row"><span>${icon(file.type.startsWith("image/") ? "camera" : "fileText")} <strong>${esc(file.name)}</strong><small>${formatBytes(file.size)}</small></span></div>`).join("") : "尚未选择文件";
+    }
+    return;
+  }
   const query = event.target.closest("[data-query]");
   if (query) {
     state.ui.query = query.value;
@@ -1423,3 +1715,5 @@ window.addEventListener("scroll", () => {
 
 saveState();
 render();
+registerServiceWorker();
+void hydrateStateFromIdb();

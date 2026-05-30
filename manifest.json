@@ -1,0 +1,19 @@
+{
+  "name": "证据链管理 - EvidenceVault Clone",
+  "short_name": "证据链管理",
+  "description": "工程建设结算前证据链管理工具本地复刻版",
+  "start_url": "/evidence-vault-clone/",
+  "scope": "/evidence-vault-clone/",
+  "display": "standalone",
+  "background_color": "#0a0c10",
+  "theme_color": "#0a0c10",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/evidence-vault-clone/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

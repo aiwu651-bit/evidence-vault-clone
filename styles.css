@@ -1242,6 +1242,108 @@ a {
   background: rgba(255, 255, 255, 0.025);
 }
 
+.file-drop {
+  gap: 8px;
+  cursor: pointer;
+}
+
+.file-drop input[type="file"] {
+  width: 0.1px;
+  height: 0.1px;
+  opacity: 0;
+  overflow: hidden;
+  position: absolute;
+  z-index: -1;
+}
+
+.file-drop strong {
+  color: var(--text);
+}
+
+.file-drop span {
+  max-width: 560px;
+  line-height: 1.6;
+}
+
+.file-list,
+.attachment-list {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+}
+
+.file-list.compact {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.file-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  text-align: left;
+}
+
+.file-row span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.file-row small {
+  color: var(--muted);
+}
+
+.file-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: -4px;
+}
+
+.attachment-uploader {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.analysis-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.analysis-card {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 14px;
+  padding: 14px;
+}
+
+.analysis-card h3 {
+  margin: 0 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.analysis-card p,
+.analysis-card ul {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.analysis-card ul {
+  padding-left: 18px;
+}
+
 .tag-row {
   display: flex;
   flex-wrap: wrap;
@@ -1658,7 +1760,8 @@ a {
   .data-grid,
   .data-grid.wide-two,
   .data-grid.compact-six,
-  .metric-grid {
+  .metric-grid,
+  .analysis-grid {
     grid-template-columns: 1fr;
   }
 
